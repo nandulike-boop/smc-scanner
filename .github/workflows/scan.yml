@@ -1,0 +1,61 @@
+name: SMC data robot
+
+on:
+  schedule:
+    # Every 15 min during NSE hours (09:30–15:15 IST = 04:00–09:45 UTC): core 16 symbols incl. intraday
+    - cron: '*/15 4-9 * * 1-5'
+    # After the close (16:15 IST = 10:45 UTC): full Nifty 500 scan for Short / Mid / Long
+    - cron: '45 10 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'full = Nifty 500 + core, core = 16 core symbols only'
+        default: 'full'
+  push:
+    branches: [main]
+    paths: ['run.js', 'engine.js', 'universe.json', '.github/workflows/scan.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: smc-robot
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Pick mode
+        id: mode
+        run: |
+          MODE=full
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" != "45 10 * * 1-5" ]; then MODE=core; fi
+          if [ -n "${{ github.event.inputs.mode }}" ]; then MODE="${{ github.event.inputs.mode }}"; fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+      - name: Load previous data
+        run: |
+          git clone --depth 1 -b data "https://github.com/${GITHUB_REPOSITORY}.git" out 2>/dev/null || mkdir -p out
+          rm -rf out/.git
+
+      - name: Fetch candles and scan
+        run: node run.js ${{ steps.mode.outputs.mode }} out
+
+      - name: Publish to the data branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd out
+          git init -q
+          git checkout -q -b data
+          git add -A
+          git -c user.name="smc-robot" -c user.email="smc-robot@users.noreply.github.com" commit -qm "data $(date -u +%FT%TZ) ${{ steps.mode.outputs.mode }}"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
